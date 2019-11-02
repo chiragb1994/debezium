@@ -15,8 +15,8 @@ import org.junit.Before;
 import org.junit.Test;
 
 import io.debezium.relational.Tables;
-import io.debezium.relational.ddl.DdlParser;
 import io.debezium.relational.ddl.DdlParserSql2003;
+import io.debezium.relational.ddl.LegacyDdlParser;
 import io.debezium.util.Collect;
 import io.debezium.util.Testing;
 
@@ -36,7 +36,7 @@ public abstract class AbstractDatabaseHistoryTest {
     protected Tables t3;
     protected Tables t4;
     protected Tables all;
-    protected DdlParser parser;
+    protected LegacyDdlParser parser;
 
     @Before
     public void beforeEach() {
@@ -73,7 +73,8 @@ public abstract class AbstractDatabaseHistoryTest {
     protected void record(long pos, int entry, String ddl, Tables... update) {
         try {
             history.record(source1, position("a.log", pos, entry), "db", ddl);
-        } catch (Throwable t) {
+        }
+        catch (Throwable t) {
             fail(t.getMessage());
         }
         for (Tables tables : update) {

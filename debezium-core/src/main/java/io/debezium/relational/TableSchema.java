@@ -5,15 +5,19 @@
  */
 package io.debezium.relational;
 
+import java.util.Arrays;
 import java.util.Objects;
 import java.util.function.Function;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import io.debezium.annotation.Immutable;
 import io.debezium.data.Envelope;
 import io.debezium.data.SchemaUtil;
+import io.debezium.schema.DataCollectionSchema;
 
 /**
  * Defines the Kafka Connect {@link Schema} functionality associated with a given {@link Table table definition}, and which can
@@ -46,8 +50,11 @@ import io.debezium.data.SchemaUtil;
  * @see TableSchemaBuilder
  */
 @Immutable
-public class TableSchema {
+public class TableSchema implements DataCollectionSchema {
 
+    private static final Logger logger = LoggerFactory.getLogger(TableSchema.class);
+
+    private final TableId id;
     private final Schema keySchema;
     private final Envelope envelopeSchema;
     private final Schema valueSchema;
@@ -58,6 +65,7 @@ public class TableSchema {
      * Create an instance with the specified {@link Schema}s for the keys and values, and the functions that generate the
      * key and value for a given row of data.
      *
+     * @param id the id of the table corresponding to this schema
      * @param keySchema the schema for the primary key; may be null
      * @param keyGenerator the function that converts a row into a single key object for Kafka Connect; may not be null but may
      *            return nulls
@@ -65,14 +73,19 @@ public class TableSchema {
      * @param valueGenerator the function that converts a row into a single value object for Kafka Connect; may not be null but
      *            may return nulls
      */
-    public TableSchema(Schema keySchema, Function<Object[], Object> keyGenerator,
-            Envelope envelopeSchema,
-            Schema valueSchema, Function<Object[], Struct> valueGenerator) {
+    public TableSchema(TableId id, Schema keySchema, Function<Object[], Object> keyGenerator,
+                       Envelope envelopeSchema, Schema valueSchema, Function<Object[], Struct> valueGenerator) {
+        this.id = id;
         this.keySchema = keySchema;
         this.envelopeSchema = envelopeSchema;
         this.valueSchema = valueSchema;
         this.keyGenerator = keyGenerator != null ? keyGenerator : (row) -> null;
         this.valueGenerator = valueGenerator != null ? valueGenerator : (row) -> null;
+    }
+
+    @Override
+    public TableId id() {
+        return id;
     }
 
     /**
@@ -89,6 +102,7 @@ public class TableSchema {
      *
      * @return the Schema describing the column's that make up the primary key; null if there is no primary key
      */
+    @Override
     public Schema keySchema() {
         return keySchema;
     }
@@ -99,6 +113,7 @@ public class TableSchema {
      *
      * @return the table's envelope schema
      */
+    @Override
     public Envelope getEnvelopeSchema() {
         return envelopeSchema;
     }
@@ -111,6 +126,9 @@ public class TableSchema {
      * @return the key, or null if the {@code columnData}
      */
     public Object keyFromColumnData(Object[] columnData) {
+        if (logger.isTraceEnabled()) {
+            logger.trace("columnData from current stack: {}", Arrays.toString(columnData));
+        }
         return columnData == null ? null : keyGenerator.apply(columnData);
     }
 
@@ -132,10 +150,12 @@ public class TableSchema {
 
     @Override
     public boolean equals(Object obj) {
-        if ( obj == this ) return true;
-        if ( obj instanceof TableSchema ) {
-            TableSchema that = (TableSchema)obj;
-            return Objects.equals(this.keySchema(),that.keySchema()) && Objects.equals(this.valueSchema(),that.valueSchema());
+        if (obj == this) {
+            return true;
+        }
+        if (obj instanceof TableSchema) {
+            TableSchema that = (TableSchema) obj;
+            return Objects.equals(this.keySchema(), that.keySchema()) && Objects.equals(this.valueSchema(), that.valueSchema());
         }
         return false;
     }

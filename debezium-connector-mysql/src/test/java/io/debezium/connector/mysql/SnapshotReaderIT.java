@@ -6,14 +6,17 @@
 package io.debezium.connector.mysql;
 
 import static org.fest.assertions.Assertions.assertThat;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.fail;
 
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -27,6 +30,7 @@ import io.debezium.data.KeyValueStore;
 import io.debezium.data.KeyValueStore.Collection;
 import io.debezium.data.SchemaChangeHistory;
 import io.debezium.data.VerifyRecord;
+import io.debezium.heartbeat.Heartbeat;
 import io.debezium.util.Testing;
 
 /**
@@ -58,14 +62,16 @@ public class SnapshotReaderIT {
         if (reader != null) {
             try {
                 reader.stop();
-            } finally {
+            }
+            finally {
                 reader = null;
             }
         }
         if (context != null) {
             try {
                 context.shutdown();
-            } finally {
+            }
+            finally {
                 context = null;
                 Testing.Files.delete(DB_HISTORY_PATH);
             }
@@ -75,14 +81,17 @@ public class SnapshotReaderIT {
     protected Configuration.Builder simpleConfig() {
         return DATABASE.defaultConfig()
                 .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, false)
-                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL);
+                .with(MySqlConnectorConfig.SNAPSHOT_LOCKING_MODE, MySqlConnectorConfig.SnapshotLockingMode.MINIMAL)
+                // Explicitly enable INCLUDE_SQL_QUERY connector option. For snapshots it should have no effect as
+                // source query should not included in snapshot events.
+                .with(MySqlConnectorConfig.INCLUDE_SQL_QUERY, true);
     }
 
     @Test
     public void shouldCreateSnapshotOfSingleDatabase() throws Exception {
         config = simpleConfig()
                 .build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -99,6 +108,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -170,7 +180,8 @@ public class SnapshotReaderIT {
         if (completed.await(10, TimeUnit.SECONDS)) {
             // completed the snapshot ...
             Testing.print("completed the snapshot");
-        } else {
+        }
+        else {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }
@@ -178,7 +189,7 @@ public class SnapshotReaderIT {
     @Test
     public void shouldCreateSnapshotOfSingleDatabaseUsingReadEvents() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.DATABASE_WHITELIST, "connector_(.*)_" + DATABASE.getIdentifier()).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -195,9 +206,9 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
-                System.out.println(record);
             });
         }
         // The last poll should always return null ...
@@ -269,7 +280,8 @@ public class SnapshotReaderIT {
         if (completed.await(10, TimeUnit.SECONDS)) {
             // completed the snapshot ...
             Testing.print("completed the snapshot");
-        } else {
+        }
+        else {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }
@@ -281,7 +293,7 @@ public class SnapshotReaderIT {
     @Test
     public void shouldCreateSnapshotOfSingleDatabaseWithSchemaChanges() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -298,6 +310,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -371,7 +384,8 @@ public class SnapshotReaderIT {
         if (completed.await(10, TimeUnit.SECONDS)) {
             // completed the snapshot ...
             Testing.print("completed the snapshot");
-        } else {
+        }
+        else {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }
@@ -379,7 +393,7 @@ public class SnapshotReaderIT {
     @Test(expected = ConnectException.class)
     public void shouldCreateSnapshotSchemaOnlyRecovery_exception() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY_RECOVERY).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -396,18 +410,19 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
         }
-        
+
         // should fail because we have no existing binlog information
-    }    
-    
+    }
+
     @Test
     public void shouldCreateSnapshotSchemaOnlyRecovery() throws Exception {
         config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY_RECOVERY).build();
-        context = new MySqlTaskContext(config);
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         context.source().setBinlogStartPoint("binlog1", 555); // manually set for happy path testing
         reader = new SnapshotReader("snapshot", context);
@@ -425,6 +440,7 @@ public class SnapshotReaderIT {
         while ((records = reader.poll()) != null) {
             records.forEach(record -> {
                 VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
                 store.add(record);
                 schemaChanges.add(record);
             });
@@ -442,14 +458,86 @@ public class SnapshotReaderIT {
         if (completed.await(10, TimeUnit.SECONDS)) {
             // completed the snapshot ...
             Testing.print("completed the snapshot");
-        } else {
+        }
+        else {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }
-    
+
+    @Test
+    public void shouldSnapshotTablesInOrderSpecifiedInTablesWhitelist() throws Exception {
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.TABLE_WHITELIST,
+                        "connector_test_ro_(.*).orders,connector_test_ro_(.*).Products,connector_test_ro_(.*).products_on_hand,connector_test_ro_(.*).dbz_342_timetest")
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
+        context.start();
+        reader = new SnapshotReader("snapshot", context);
+        reader.uponCompletion(completed::countDown);
+        reader.generateInsertEvents();
+        // Start the snapshot ...
+        reader.start();
+        // Poll for records ...
+        List<SourceRecord> records;
+        LinkedHashSet<String> tablesInOrder = new LinkedHashSet<>();
+        LinkedHashSet<String> tablesInOrderExpected = getTableNamesInSpecifiedOrder("orders", "Products", "products_on_hand", "dbz_342_timetest");
+        while ((records = reader.poll()) != null) {
+            records.forEach(record -> {
+                VerifyRecord.isValid(record);
+                if (record.value() != null) {
+                    tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+                }
+            });
+        }
+        assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
+    }
+
+    @Test
+    public void shouldSnapshotTablesInLexicographicalOrder() throws Exception {
+        config = simpleConfig()
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
+        context.start();
+        reader = new SnapshotReader("snapshot", context);
+        reader.uponCompletion(completed::countDown);
+        reader.generateInsertEvents();
+        // Start the snapshot ...
+        reader.start();
+        // Poll for records ...
+        // Testing.Print.enable();
+        List<SourceRecord> records;
+        LinkedHashSet<String> tablesInOrder = new LinkedHashSet<>();
+        LinkedHashSet<String> tablesInOrderExpected = getTableNamesInSpecifiedOrder("Products", "customers", "dbz_342_timetest", "orders", "products_on_hand");
+        while ((records = reader.poll()) != null) {
+            records.forEach(record -> {
+                VerifyRecord.isValid(record);
+                VerifyRecord.hasNoSourceQuery(record);
+                if (record.value() != null) {
+                    tablesInOrder.add(getTableNameFromSourceRecord.apply(record));
+                }
+            });
+        }
+        assertArrayEquals(tablesInOrder.toArray(), tablesInOrderExpected.toArray());
+    }
+
+    private Function<SourceRecord, String> getTableNameFromSourceRecord = sourceRecord -> ((Struct) sourceRecord.value()).getStruct("source").getString("table");
+
+    private LinkedHashSet<String> getTableNamesInSpecifiedOrder(String... tables) {
+        LinkedHashSet<String> tablesInOrderExpected = new LinkedHashSet<>();
+        for (String table : tables) {
+            tablesInOrderExpected.add(table);
+        }
+        return tablesInOrderExpected;
+    }
+
+    @Test
     public void shouldCreateSnapshotSchemaOnly() throws Exception {
-        config = simpleConfig().with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY).build();
-        context = new MySqlTaskContext(config);
+        config = simpleConfig()
+                .with(MySqlConnectorConfig.SNAPSHOT_MODE, MySqlConnectorConfig.SnapshotMode.SCHEMA_ONLY)
+                .with(MySqlConnectorConfig.INCLUDE_SCHEMA_CHANGES, true)
+                .with(Heartbeat.HEARTBEAT_INTERVAL, 300_000)
+                .build();
+        context = new MySqlTaskContext(config, new Filters.Builder(config).build());
         context.start();
         reader = new SnapshotReader("snapshot", context);
         reader.uponCompletion(completed::countDown);
@@ -463,27 +551,45 @@ public class SnapshotReaderIT {
         List<SourceRecord> records = null;
         KeyValueStore store = KeyValueStore.createForTopicsBeginningWith(DATABASE.getServerName() + ".");
         SchemaChangeHistory schemaChanges = new SchemaChangeHistory(DATABASE.getServerName());
+
+        SourceRecord heartbeatRecord = null;
+
         while ((records = reader.poll()) != null) {
+            assertThat(heartbeatRecord).describedAs("Heartbeat record must be the last one").isNull();
+            if (heartbeatRecord == null &&
+                    records.size() > 0 &&
+                    records.get(records.size() - 1).topic().startsWith("__debezium-heartbeat")) {
+                heartbeatRecord = records.get(records.size() - 1);
+            }
             records.forEach(record -> {
-                VerifyRecord.isValid(record);
-                store.add(record);
-                schemaChanges.add(record);
+                if (!record.topic().startsWith("__debezium-heartbeat")) {
+                    assertThat(record.sourceOffset().get("snapshot")).isEqualTo(true);
+                    VerifyRecord.isValid(record);
+                    VerifyRecord.hasNoSourceQuery(record);
+                    store.add(record);
+                    schemaChanges.add(record);
+                }
             });
         }
         // The last poll should always return null ...
         assertThat(records).isNull();
 
-        // There should be no schema changes ...
-        assertThat(schemaChanges.recordCount()).isEqualTo(0);
+        // There should be schema changes ...
+        assertThat(schemaChanges.recordCount()).isEqualTo(14);
 
         // Check the records via the store ...
         assertThat(store.collectionCount()).isEqualTo(0);
+
+        // Check that heartbeat has arrived
+        assertThat(heartbeatRecord).isNotNull();
+        assertThat(heartbeatRecord.sourceOffset().get("snapshot")).isNotEqualTo(true);
 
         // Make sure the snapshot completed ...
         if (completed.await(10, TimeUnit.SECONDS)) {
             // completed the snapshot ...
             Testing.print("completed the snapshot");
-        } else {
+        }
+        else {
             fail("failed to complete the snapshot within 10 seconds");
         }
     }

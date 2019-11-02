@@ -6,6 +6,8 @@
 package io.debezium.relational;
 
 import java.sql.Types;
+import java.util.List;
+import java.util.Optional;
 
 import io.debezium.annotation.Immutable;
 
@@ -90,9 +92,9 @@ public interface Column extends Comparable<Column> {
     /**
      * Get the scale of the column.
      *
-     * @return the scale, or -1 if the scale does not apply to this type
+     * @return the scale if it applies to this type
      */
-    int scale();
+    Optional<Integer> scale();
 
     /**
      * Determine whether this column is optional.
@@ -126,9 +128,32 @@ public interface Column extends Comparable<Column> {
      */
     boolean isGenerated();
 
+    /**
+     * Get the default value of the column
+     *
+     * @return the default value
+     */
+    Object defaultValue();
+
+    /**
+     * Determine whether this column's has a default value
+     *
+     * @return {@code true} if the default value was provided, or {@code false} otherwise
+     */
+    boolean hasDefaultValue();
+
+    /**
+     * Get the list of values associated with the enum
+     *
+     * @return the list of enum values
+     */
+    List<String> enumValues();
+
     @Override
     default int compareTo(Column that) {
-        if (this == that) return 0;
+        if (this == that) {
+            return 0;
+        }
         return this.position() - that.position();
     }
 

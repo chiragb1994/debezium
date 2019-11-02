@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>0.8.0-SNAPSHOT</version>
+        <version>1.0.0-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -15,6 +15,10 @@
         <dependency>
             <groupId>io.debezium</groupId>
             <artifactId>debezium-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.debezium</groupId>
+            <artifactId>debezium-ddl-parser</artifactId>
         </dependency>
         <dependency>
             <groupId>com.github.shyiko</groupId>
@@ -38,6 +42,12 @@
         <dependency>
             <groupId>mysql</groupId>
             <artifactId>mysql-connector-java</artifactId>
+            <exclusions>
+                <exclusion>
+                    <groupId>com.google.protobuf</groupId>
+                    <artifactId>protobuf-java</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
 
         <!-- Testing -->
@@ -74,6 +84,11 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.mockito</groupId>
+            <artifactId>mockito-core</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.easytesting</groupId>
             <artifactId>fest-assert</artifactId>
             <scope>test</scope>
@@ -103,6 +118,7 @@
         -->
         <docker.filter>debezium/mysql-server-test-database</docker.filter>
         <docker.skip>false</docker.skip>
+        <docker.initimage>ln -s /usr/share/zoneinfo/US/Samoa /etc/localtime</docker.initimage>
     </properties>
     <build>
         <plugins>
@@ -113,7 +129,7 @@
                 <watchInterval>500</watchInterval>
                 <logDate>default</logDate>
                 <verbose>true</verbose>
-                <autoPull>always</autoPull>
+                <imagePullPolicy>IfNotPresent</imagePullPolicy>
                 <images>
                   <!--
                   Images based on "mysql/mysql-server" Docker image
@@ -144,6 +160,9 @@
                     </run>
                     <build>
                       <from>mysql/mysql-server:${version.mysql.server}</from>
+                      <runCmds>
+                        <run>${docker.initimage}</run>
+                      </runCmds>
                       <assembly>
                         <inline>
                           <fileSets>
@@ -191,6 +210,9 @@
                     </run>
                     <build>
                       <from>mysql/mysql-server:${version.mysql.server}</from>
+                      <runCmds>
+                        <run>${docker.initimage}</run>
+                      </runCmds>
                       <assembly>
                         <inline>
                           <fileSets>
@@ -242,6 +264,9 @@
                     </run>
                     <build>
                       <from>mysql/mysql-server:${version.mysql.server}</from>
+                      <runCmds>
+                        <run>${docker.initimage}</run>
+                      </runCmds>
                       <assembly>
                         <inline>
                           <fileSets>
@@ -307,6 +332,7 @@
                         <database.replica.port>${mysql.replica.port}</database.replica.port>
                         <skipLongRunningTests>${skipLongRunningTests}</skipLongRunningTests>
                     </systemPropertyVariables>
+                    <runOrder>alphabetical</runOrder>
                 </configuration>
                 <executions>
                     <execution>
@@ -394,7 +420,7 @@
                                     <finalName>${project.artifactId}-${project.version}</finalName>
                                     <attach>true</attach>  <!-- we want attach & deploy these to Maven -->
                                     <descriptorRefs>
-                                        <descriptorRef>connector-distribution</descriptorRef>
+                                        <descriptorRef>${assembly.descriptor}</descriptorRef>
                                     </descriptorRefs>
                                 </configuration>
                             </execution>
@@ -421,6 +447,7 @@
                                 <database.port>${mysql.port}</database.port>
                                 <database.replica.port>${mysql.port}</database.replica.port>
                                 <skipLongRunningTests>false</skipLongRunningTests>
+                                <runOrder>alphabetical</runOrder>
                             </systemPropertyVariables>
                         </configuration>
                         <executions>
@@ -523,5 +550,6 @@
           <database.replica.port>${mysql.gtid.replica.port}</database.replica.port>
         </properties>
       </profile>
+
     </profiles>
 </project>

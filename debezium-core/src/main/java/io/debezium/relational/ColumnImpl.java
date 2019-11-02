@@ -5,6 +5,11 @@
  */
 package io.debezium.relational;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
 import io.debezium.util.Strings;
 
 final class ColumnImpl implements Column, Comparable<Column> {
@@ -16,14 +21,32 @@ final class ColumnImpl implements Column, Comparable<Column> {
     private final String typeExpression;
     private final String charsetName;
     private final int length;
-    private final int scale;
+    private final Integer scale;
     private final boolean optional;
     private final boolean autoIncremented;
     private final boolean generated;
+    private final Object defaultValue;
+    private final boolean hasDefaultValue;
+    private final List<String> enumValues;
+
+    protected ColumnImpl(String columnName, int position, int jdbcType, int componentType, String typeName, String typeExpression,
+                         String charsetName, String defaultCharsetName, int columnLength, Integer columnScale,
+                         boolean optional, boolean autoIncremented, boolean generated) {
+        this(columnName, position, jdbcType, componentType, typeName, typeExpression, charsetName,
+                defaultCharsetName, columnLength, columnScale, null, optional, autoIncremented, generated, null, false);
+    }
 
     protected ColumnImpl(String columnName, int position, int jdbcType, int nativeType, String typeName, String typeExpression,
-                         String charsetName, String defaultCharsetName, int columnLength, int columnScale,
-                         boolean optional, boolean autoIncremented, boolean generated) {
+                         String charsetName, String defaultCharsetName, int columnLength, Integer columnScale,
+                         boolean optional, boolean autoIncremented, boolean generated, Object defaultValue, boolean hasDefaultValue) {
+        this(columnName, position, jdbcType, nativeType, typeName, typeExpression, charsetName,
+                defaultCharsetName, columnLength, columnScale, null, optional, autoIncremented, generated, defaultValue, hasDefaultValue);
+    }
+
+    protected ColumnImpl(String columnName, int position, int jdbcType, int nativeType, String typeName, String typeExpression,
+                         String charsetName, String defaultCharsetName, int columnLength, Integer columnScale,
+                         List<String> enumValues,
+                         boolean optional, boolean autoIncremented, boolean generated, Object defaultValue, boolean hasDefaultValue) {
         this.name = columnName;
         this.position = position;
         this.jdbcType = jdbcType;
@@ -31,7 +54,7 @@ final class ColumnImpl implements Column, Comparable<Column> {
         this.typeName = typeName;
         this.typeExpression = typeExpression;
         // We want to always capture the charset name for the column (if the column needs one) ...
-        if ( typeUsesCharset() && (charsetName == null || "DEFAULT".equalsIgnoreCase(charsetName)) ) {
+        if (typeUsesCharset() && (charsetName == null || "DEFAULT".equalsIgnoreCase(charsetName))) {
             // Use the default charset name ...
             charsetName = defaultCharsetName;
         }
@@ -41,7 +64,9 @@ final class ColumnImpl implements Column, Comparable<Column> {
         this.optional = optional;
         this.autoIncremented = autoIncremented;
         this.generated = generated;
-        assert this.scale >= -1;
+        this.defaultValue = defaultValue;
+        this.hasDefaultValue = hasDefaultValue;
+        this.enumValues = enumValues == null ? new ArrayList<>() : enumValues;
         assert this.length >= -1;
     }
 
@@ -79,15 +104,15 @@ final class ColumnImpl implements Column, Comparable<Column> {
     public String charsetName() {
         return charsetName;
     }
-    
+
     @Override
     public int length() {
         return length;
     }
 
     @Override
-    public int scale() {
-        return scale;
+    public Optional<Integer> scale() {
+        return Optional.ofNullable(scale);
     }
 
     @Override
@@ -106,26 +131,46 @@ final class ColumnImpl implements Column, Comparable<Column> {
     }
 
     @Override
+    public Object defaultValue() {
+        return defaultValue;
+    }
+
+    @Override
+    public boolean hasDefaultValue() {
+        return hasDefaultValue;
+    }
+
+    @Override
+    public List<String> enumValues() {
+        return enumValues;
+    }
+
+    @Override
     public int hashCode() {
         return name.hashCode();
     }
 
     @Override
     public boolean equals(Object obj) {
-        if (obj == this) return true;
+        if (obj == this) {
+            return true;
+        }
         if (obj instanceof Column) {
             Column that = (Column) obj;
             return this.name().equalsIgnoreCase(that.name()) &&
                     this.typeExpression().equalsIgnoreCase(that.typeExpression()) &&
                     this.typeName().equalsIgnoreCase(that.typeName()) &&
                     this.jdbcType() == that.jdbcType() &&
-                    Strings.equalsIgnoreCase(this.charsetName(),that.charsetName()) &&
+                    Strings.equalsIgnoreCase(this.charsetName(), that.charsetName()) &&
                     this.position() == that.position() &&
                     this.length() == that.length() &&
-                    this.scale() == that.scale() &&
+                    this.scale().equals(that.scale()) &&
                     this.isOptional() == that.isOptional() &&
                     this.isAutoIncremented() == that.isAutoIncremented() &&
-                    this.isGenerated() == that.isGenerated();
+                    this.isGenerated() == that.isGenerated() &&
+                    Objects.equals(this.defaultValue(), that.defaultValue()) &&
+                    this.hasDefaultValue() == that.hasDefaultValue() &&
+                    this.enumValues().equals(that.enumValues());
         }
         return false;
     }
@@ -136,17 +181,29 @@ final class ColumnImpl implements Column, Comparable<Column> {
         sb.append(" ").append(typeName);
         if (length >= 0) {
             sb.append('(').append(length);
-            if (scale >= 0) {
-                sb.append(',').append(scale);
+            if (scale != null) {
+                sb.append(", ").append(scale);
             }
             sb.append(')');
         }
         if (charsetName != null && !charsetName.isEmpty()) {
             sb.append(" CHARSET ").append(charsetName);
         }
-        if (!optional) sb.append(" NOT NULL");
-        if (autoIncremented) sb.append(" AUTO_INCREMENTED");
-        if (generated) sb.append(" GENERATED");
+        if (!optional) {
+            sb.append(" NOT NULL");
+        }
+        if (autoIncremented) {
+            sb.append(" AUTO_INCREMENTED");
+        }
+        if (generated) {
+            sb.append(" GENERATED");
+        }
+        if (hasDefaultValue() && defaultValue() == null) {
+            sb.append(" DEFAULT VALUE NULL");
+        }
+        else if (defaultValue != null) {
+            sb.append(" DEFAULT VALUE ").append(defaultValue);
+        }
         return sb.toString();
     }
 
@@ -159,11 +216,15 @@ final class ColumnImpl implements Column, Comparable<Column> {
                 .nativeType(nativeType)
                 .charsetName(charsetName)
                 .length(length())
-                .scale(scale())
+                .scale(scale().orElse(null))
                 .position(position())
                 .optional(isOptional())
                 .autoIncremented(isAutoIncremented())
-                .generated(isGenerated());
+                .generated(isGenerated())
+                .enumValues(enumValues);
+        if (hasDefaultValue()) {
+            editor.defaultValue(defaultValue());
+        }
         return editor;
     }
 }

@@ -10,9 +10,10 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 import org.apache.kafka.connect.errors.ConnectException;
@@ -84,7 +85,8 @@ public class ConnectionContext implements AutoCloseable {
             // Closing all connections ...
             logger().info("Closing all connections to {}", replicaSets);
             pool.clear();
-        } catch (Throwable e) {
+        }
+        catch (Throwable e) {
             logger().error("Unexpected error shutting down the MongoDB clients", e);
         }
     }
@@ -120,7 +122,7 @@ public class ConnectionContext implements AutoCloseable {
     }
 
     public MongoClient clientFor(List<ServerAddress> addresses) {
-        if ( this.useHostsAsSeeds || addresses.isEmpty() ) {
+        if (this.useHostsAsSeeds || addresses.isEmpty()) {
             return pool.clientForMembers(addresses);
         }
         return pool.clientFor(addresses.get(0));
@@ -147,12 +149,13 @@ public class ConnectionContext implements AutoCloseable {
      * this context's back-off strategy) if required until the primary becomes available.
      *
      * @param replicaSet the replica set information; may not be null
+     * @param filters the filter configuration
      * @param errorHandler the function to be called whenever the primary is unable to
      *            {@link MongoPrimary#execute(String, Consumer) execute} an operation to completion; may be null
      * @return the client, or {@code null} if no primary could be found for the replica set
      */
-    public ConnectionContext.MongoPrimary primaryFor(ReplicaSet replicaSet, BiConsumer<String, Throwable> errorHandler) {
-        return new ConnectionContext.MongoPrimary(this, replicaSet, errorHandler);
+    public ConnectionContext.MongoPrimary primaryFor(ReplicaSet replicaSet, Filters filters, BiConsumer<String, Throwable> errorHandler) {
+        return new ConnectionContext.MongoPrimary(this, replicaSet, filters, errorHandler);
     }
 
     /**
@@ -166,9 +169,10 @@ public class ConnectionContext implements AutoCloseable {
         return primaryClientFor(replicaSet, (attempts, remaining, error) -> {
             if (error == null) {
                 logger().info("Unable to connect to primary node of '{}' after attempt #{} ({} remaining)", replicaSet, attempts, remaining);
-            } else {
+            }
+            else {
                 logger().error("Error while attempting to connect to primary node of '{}' after attempt #{} ({} remaining): {}", replicaSet,
-                             attempts, remaining, error.getMessage(), error);
+                        attempts, remaining, error.getMessage(), error);
             }
         });
     }
@@ -192,8 +196,11 @@ public class ConnectionContext implements AutoCloseable {
                 try {
                     // Try to get the primary
                     primary = factory.get();
-                    if (primary != null) break;
-                } catch (Throwable t) {
+                    if (primary != null) {
+                        break;
+                    }
+                }
+                catch (Throwable t) {
                     handler.failed(attempts, maxAttempts - attempts, t);
                 }
                 if (attempts > maxAttempts) {
@@ -219,11 +226,14 @@ public class ConnectionContext implements AutoCloseable {
     public static class MongoPrimary {
         private final ReplicaSet replicaSet;
         private final Supplier<MongoClient> primaryConnectionSupplier;
+        private final Filters filters;
         private final BiConsumer<String, Throwable> errorHandler;
+        private final AtomicBoolean running = new AtomicBoolean(true);
 
-        protected MongoPrimary(ConnectionContext context, ReplicaSet replicaSet, BiConsumer<String, Throwable> errorHandler) {
+        protected MongoPrimary(ConnectionContext context, ReplicaSet replicaSet, Filters filters, BiConsumer<String, Throwable> errorHandler) {
             this.replicaSet = replicaSet;
             this.primaryConnectionSupplier = context.primaryClientFor(replicaSet);
+            this.filters = filters;
             this.errorHandler = errorHandler;
         }
 
@@ -242,14 +252,15 @@ public class ConnectionContext implements AutoCloseable {
          * @return the address of the replica set's primary node, or {@code null} if there is currently no primary
          */
         public ServerAddress address() {
-            AtomicReference<ServerAddress> address = new AtomicReference<>();
-            execute("get replica set primary", primary -> {
+            return execute("get replica set primary", primary -> {
                 ReplicaSetStatus rsStatus = primary.getReplicaSetStatus();
                 if (rsStatus != null) {
-                    address.set(rsStatus.getMaster());
+                    return rsStatus.getMaster();
+                }
+                else {
+                    return null;
                 }
             });
-            return address.get();
         }
 
         /**
@@ -266,8 +277,42 @@ public class ConnectionContext implements AutoCloseable {
                 try {
                     operation.accept(primary);
                     return;
-                } catch (Throwable t) {
+                }
+                catch (Throwable t) {
                     errorHandler.accept(desc, t);
+                    if (!isRunning()) {
+                        throw new ConnectException("Operation failed and MongoDB primary termination requested", t);
+                    }
+                    try {
+                        errorMetronome.pause();
+                    }
+                    catch (InterruptedException e) {
+                        // Interruption is not propagated
+                    }
+                }
+            }
+        }
+
+        /**
+         * Execute the supplied operation using the primary, blocking until a primary is available. Whenever the operation stops
+         * (e.g., if the primary is no longer primary), then restart the operation using the current primary.
+         *
+         * @param desc the description of the operation, for logging purposes
+         * @param operation the operation to be performed on the primary
+         * @return return value of the executed operation
+         */
+        public <T> T execute(String desc, Function<MongoClient, T> operation) {
+            final Metronome errorMetronome = Metronome.sleeper(PAUSE_AFTER_ERROR, Clock.SYSTEM);
+            while (true) {
+                MongoClient primary = primaryConnectionSupplier.get();
+                try {
+                    return operation.apply(primary);
+                }
+                catch (Throwable t) {
+                    errorHandler.accept(desc, t);
+                    if (!isRunning()) {
+                        throw new ConnectException("Operation failed and MongoDB primary termination requested", t);
+                    }
                     try {
                         errorMetronome.pause();
                     }
@@ -293,49 +338,81 @@ public class ConnectionContext implements AutoCloseable {
                 try {
                     operation.accept(primary);
                     return;
-                } catch (Throwable t) {
+                }
+                catch (InterruptedException e) {
+                    throw e;
+                }
+                catch (Throwable t) {
                     errorHandler.accept(desc, t);
+                    if (!isRunning()) {
+                        throw new ConnectException("Operation failed and MongoDB primary termination requested", t);
+                    }
                     errorMetronome.pause();
                 }
             }
         }
 
         /**
-         * Use the primary to get the names of all the databases in the replica set. This method will block until
-         * a primary can be obtained to get the names of all databases in the replica set.
+         * Use the primary to get the names of all the databases in the replica set, applying the current database
+         * filter configuration. This method will block until a primary can be obtained to get the names of all
+         * databases in the replica set.
          *
          * @return the database names; never null but possibly empty
          */
         public Set<String> databaseNames() {
-            Set<String> databaseNames = new HashSet<>();
-            execute("get database names", primary -> {
-                databaseNames.clear(); // in case we restarted
-                MongoUtil.forEachDatabaseName(primary, databaseNames::add);
+            return execute("get database names", primary -> {
+                Set<String> databaseNames = new HashSet<>();
+
+                MongoUtil.forEachDatabaseName(
+                        primary,
+                        dbName -> {
+                            if (filters.databaseFilter().test(dbName)) {
+                                databaseNames.add(dbName);
+                            }
+                        });
+
+                return databaseNames;
             });
-            return databaseNames;
         }
 
         /**
-         * Use the primary to get the identifiers of all the collections in the replica set. This method will block until
-         * a primary can be obtained to get the identifiers of all collections in the replica set.
+         * Use the primary to get the identifiers of all the collections in the replica set, applying the current
+         * collection filter configuration. This method will block until a primary can be obtained to get the
+         * identifiers of all collections in the replica set.
          *
          * @return the collection identifiers; never null
          */
         public List<CollectionId> collections() {
             String replicaSetName = replicaSet.replicaSetName();
+
             // For each database, get the list of collections ...
-            List<CollectionId> collections = new ArrayList<>();
-            execute("get collections in databases", primary -> {
-                collections.clear(); // in case we restarted
+            return execute("get collections in databases", primary -> {
+                List<CollectionId> collections = new ArrayList<>();
                 Set<String> databaseNames = databaseNames();
-                MongoUtil.forEachDatabaseName(primary, databaseNames::add);
-                databaseNames.forEach(dbName -> {
+
+                for (String dbName : databaseNames) {
                     MongoUtil.forEachCollectionNameInDatabase(primary, dbName, collectionName -> {
-                        collections.add(new CollectionId(replicaSetName, dbName, collectionName));
+                        CollectionId collectionId = new CollectionId(replicaSetName, dbName, collectionName);
+
+                        if (filters.collectionFilter().test(collectionId)) {
+                            collections.add(collectionId);
+                        }
                     });
-                });
+                }
+
+                return collections;
             });
-            return collections;
+        }
+
+        private boolean isRunning() {
+            return running.get();
+        }
+
+        /**
+         * Terminates the execution loop of the current primary
+         */
+        public void stop() {
+            running.set(false);
         }
     }
 
@@ -349,7 +426,7 @@ public class ConnectionContext implements AutoCloseable {
         MongoClient replicaSetClient = clientForReplicaSet(replicaSet);
         ReplicaSetStatus rsStatus = replicaSetClient.getReplicaSetStatus();
         if (rsStatus == null) {
-            if ( !this.useHostsAsSeeds ) {
+            if (!this.useHostsAsSeeds) {
                 // No replica set status is available, but it may still be a replica set ...
                 return replicaSetClient;
             }

@@ -3,7 +3,7 @@
     <parent>
         <groupId>io.debezium</groupId>
         <artifactId>debezium-parent</artifactId>
-        <version>0.8.0-SNAPSHOT</version>
+        <version>1.0.0-SNAPSHOT</version>
         <relativePath>../</relativePath>
     </parent>
     <modelVersion>4.0.0</modelVersion>
@@ -17,15 +17,18 @@
           work on all platforms. We'll set some of these as system properties during integration testing.
       -->
         <version.postgres.server>9.6</version.postgres.server>
+        <postgres.host>${docker.host.address}</postgres.host>
         <postgres.port>5432</postgres.port>
         <postgres.user>postgres</postgres.user>
         <postgres.password>postgres</postgres.password>
         <postgres.db.name>postgres</postgres.db.name>
         <postgres.encoding>UTF8</postgres.encoding>
         <postgres.system.lang>en_US.utf8</postgres.system.lang>
-        <docker.filter>debezium/postgres:${version.postgres.server}</docker.filter>
+        <postgres.image>debezium/postgres:${version.postgres.server}</postgres.image>
+        <postgres.config.file>/usr/share/postgresql/postgresql.conf.sample</postgres.config.file>
         <docker.skip>false</docker.skip>
         <docker.showLogs>true</docker.showLogs>
+        <docker.initimage>ln -fs /usr/share/zoneinfo/US/Samoa /etc/localtime &amp;&amp; echo timezone=US/Samoa &gt;&gt; ${postgres.config.file}</docker.initimage>
 
         <protobuf.output.directory>${project.basedir}/generated-sources</protobuf.output.directory>
     </properties>
@@ -88,6 +91,11 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>org.easytesting</groupId>
             <artifactId>fest-assert</artifactId>
             <scope>test</scope>
@@ -130,7 +138,7 @@
                     <images>
                         <image>
                             <!-- A Docker image using the Postgres Server with the DBZ decoderbufs plugin -->
-                            <name>${docker.filter}</name>  
+                            <name>debezium/postgres-server-test-database</name>
                             <run>
                                 <namingStrategy>none</namingStrategy>
                                 <env>
@@ -153,6 +161,12 @@
                                     <log>(?s)PostgreSQL init process complete.*database system is ready to accept connections</log>
                                 </wait>
                             </run>
+                            <build>
+                                <from>${postgres.image}</from>
+                                 <runCmds>
+                                   <run>${docker.initimage}</run>
+                                 </runCmds>
+                            </build>
                         </image>
                     </images>
                 </configuration>
@@ -165,6 +179,7 @@
                         <id>start</id>
                         <phase>pre-integration-test</phase>
                         <goals>
+                            <goal>build</goal>
                             <goal>start</goal>
                         </goals>
                     </execution>
@@ -204,7 +219,7 @@
                     <enableAssertions>true</enableAssertions>
                     <systemPropertyVariables>
                         <!-- Make these available to the tests via system properties -->
-                        <database.hostname>${docker.host.address}</database.hostname>
+                        <database.hostname>${postgres.host}</database.hostname>
                         <database.port>${postgres.port}</database.port>
                         <database.user>${postgres.user}</database.user>
                         <database.password>${postgres.password}</database.password>
@@ -269,7 +284,7 @@
                                     <finalName>${project.artifactId}-${project.version}</finalName>
                                     <attach>true</attach>  <!-- we want attach & deploy these to Maven -->
                                     <descriptorRefs>
-                                        <descriptorRef>connector-distribution</descriptorRef>
+                                        <descriptorRef>${assembly.descriptor}</descriptorRef>
                                     </descriptorRefs>
                                 </configuration>
                             </execution>
@@ -295,9 +310,21 @@
             </properties>
         </profile>
         <profile>
+            <id>postgres-10</id>
+            <properties>
+                <version.postgres.server>10</version.postgres.server>
+            </properties>
+        </profile>
+        <profile>
             <id>wal2json-decoder</id>
             <properties>
                 <decoder.plugin.name>wal2json</decoder.plugin.name>
+            </properties>
+        </profile>
+        <profile>
+            <id>pgoutput-decoder</id>
+            <properties>
+                <decoder.plugin.name>pgoutput</decoder.plugin.name>
             </properties>
         </profile>
         <profile>

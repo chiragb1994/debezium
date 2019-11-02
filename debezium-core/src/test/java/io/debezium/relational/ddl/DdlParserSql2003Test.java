@@ -5,12 +5,13 @@
  */
 package io.debezium.relational.ddl;
 
+import static org.fest.assertions.Assertions.assertThat;
+import static org.junit.Assert.assertFalse;
+
 import java.sql.Types;
 
 import org.junit.Before;
 import org.junit.Test;
-
-import static org.fest.assertions.Assertions.assertThat;
 
 import io.debezium.relational.Column;
 import io.debezium.relational.Table;
@@ -19,7 +20,7 @@ import io.debezium.relational.Tables;
 
 public class DdlParserSql2003Test {
 
-    private DdlParser parser;
+    private LegacyDdlParser parser;
     private Tables tables;
 
     @Before
@@ -48,12 +49,12 @@ public class DdlParserSql2003Test {
                 + "); " + System.lineSeparator();
         parser.parse(ddl, tables);
         assertThat(tables.size()).isEqualTo(1);
-        Table foo = tables.forTable(new TableId(null,null,"foo"));
+        Table foo = tables.forTable(new TableId(null, null, "foo"));
         assertThat(foo).isNotNull();
-        assertThat(foo.columnNames()).containsExactly("c1","c2");
+        assertThat(foo.retrieveColumnNames()).containsExactly("c1", "c2");
         assertThat(foo.primaryKeyColumnNames()).containsExactly("c1");
-        assertColumn(foo,"c1","INTEGER",Types.INTEGER,-1,-1,false,true,true);
-        assertColumn(foo,"c2","VARCHAR",Types.VARCHAR,22,-1,true,false,false);
+        assertColumn(foo, "c1", "INTEGER", Types.INTEGER, -1, -1, false, true, true);
+        assertColumn(foo, "c2", "VARCHAR", Types.VARCHAR, 22, -1, true, false, false);
     }
 
     @Test
@@ -65,25 +66,30 @@ public class DdlParserSql2003Test {
                 + "); " + System.lineSeparator();
         parser.parse(ddl, tables);
         assertThat(tables.size()).isEqualTo(1);
-        Table foo = tables.forTable(new TableId("my",null,"foo"));
+        Table foo = tables.forTable(new TableId("my", null, "foo"));
         assertThat(foo).isNotNull();
-        assertThat(foo.columnNames()).containsExactly("c1","c2");
+        assertThat(foo.retrieveColumnNames()).containsExactly("c1", "c2");
         assertThat(foo.primaryKeyColumnNames()).containsExactly("c1");
-        assertColumn(foo,"c1","INTEGER",Types.INTEGER,-1,-1,false,true,true);
-        assertColumn(foo,"c2","VARCHAR",Types.VARCHAR,22,-1,true,false,false);
+        assertColumn(foo, "c1", "INTEGER", Types.INTEGER, -1, -1, false, true, true);
+        assertColumn(foo, "c2", "VARCHAR", Types.VARCHAR, 22, -1, true, false, false);
 
         parser.parse("DROP TABLE my.foo", tables);
         assertThat(tables.size()).isEqualTo(0);
     }
-    
+
     protected void assertColumn(Table table, String name, String typeName, int jdbcType, int length, int scale,
-                                boolean optional, boolean generated, boolean autoIncremented ) {
+                                boolean optional, boolean generated, boolean autoIncremented) {
         Column column = table.columnWithName(name);
         assertThat(column.name()).isEqualTo(name);
         assertThat(column.typeName()).isEqualTo(typeName);
         assertThat(column.jdbcType()).isEqualTo(jdbcType);
         assertThat(column.length()).isEqualTo(length);
-        assertThat(column.scale()).isEqualTo(scale);
+        if (scale == Column.UNSET_INT_VALUE) {
+            assertFalse(column.scale().isPresent());
+        }
+        else {
+            assertThat(column.scale().get()).isEqualTo(scale);
+        }
         assertThat(column.isOptional()).isEqualTo(optional);
         assertThat(column.isGenerated()).isEqualTo(generated);
         assertThat(column.isAutoIncremented()).isEqualTo(autoIncremented);

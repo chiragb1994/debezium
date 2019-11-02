@@ -8,6 +8,7 @@ package io.debezium.connector.postgresql.connection.wal2json;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.Arrays;
 
 import org.apache.kafka.connect.errors.ConnectException;
@@ -16,7 +17,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.debezium.connector.postgresql.TypeRegistry;
-import io.debezium.connector.postgresql.connection.MessageDecoder;
+import io.debezium.connector.postgresql.connection.AbstractMessageDecoder;
 import io.debezium.connector.postgresql.connection.ReplicationStream.ReplicationMessageProcessor;
 import io.debezium.document.Document;
 import io.debezium.document.DocumentReader;
@@ -76,7 +77,7 @@ import io.debezium.document.DocumentReader;
  * @author Jiri Pechanec
  *
  */
-public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
+public class StreamingWal2JsonMessageDecoder extends AbstractMessageDecoder {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(StreamingWal2JsonMessageDecoder.class);
 
@@ -88,6 +89,7 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
     private static final byte RIGHT_BRACKET = 93;
     private static final byte LEFT_BRACE = 123;
     private static final byte RIGHT_BRACE = 125;
+    private static final long UNDEFINED_LONG = -1;
 
     private final DateTimeFormat dateTime = DateTimeFormat.get();
     private boolean containsMetadata = false;
@@ -101,9 +103,7 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
 
     private long txId;
 
-    private String timestamp;
-
-    private long commitTime;
+    private Instant commitTime;
 
     @Override
     public void processMessage(ByteBuffer buffer, ReplicationMessageProcessor processor, TypeRegistry typeRegistry) throws SQLException, InterruptedException {
@@ -123,47 +123,90 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
             }
 
             if (!messageInProgress) {
-                // We received the beginning of a transaction
-                if (getLastNonWhiteChar(content) != RIGHT_BRACE) {
-                    // Chunks are enabled and we have an unfinished message, it is necessary to add a sequence of closing chars
-                    content[lastPos - 1] = RIGHT_BRACKET;
-                    content[lastPos] = RIGHT_BRACE;
-                }
-                final Document message = DocumentReader.defaultReader().read(content);
-                txId = message.getLong("xid");
-                timestamp = message.getString("timestamp");
-                commitTime = dateTime.systemTimestamp(timestamp);
-                messageInProgress = true;
-                currentChunk = null;
-            }
-            else {
                 byte firstChar = getFirstNonWhiteChar(content);
-                // We are receiving changes in chunks
-                if (firstChar == LEFT_BRACE) {
-                    // First change, this is a valid JSON
-                    currentChunk = content;
-                }
-                else if (firstChar == COMMA) {
-                    // following changes, they have an extra comma at the start of message
-                    doProcessMessage(processor, typeRegistry, currentChunk, false);
-                    replaceFirstNonWhiteChar(content, SPACE);
-                    currentChunk = content;
-                }
-                else if (firstChar == RIGHT_BRACKET) {
-                    // No more changes
-                    if (currentChunk != null) {
-                        doProcessMessage(processor, typeRegistry, currentChunk, true);
-                    }
-                    messageInProgress = false;
+                if (firstChar != LEFT_BRACE) {
+                    outOfOrderChunk(content);
+                    nonInitialChunk(processor, typeRegistry, content);
                 }
                 else {
-                    throw new ConnectException("Chunk arrived in unexpected state");
+                    // We received the beginning of a transaction
+                    if (getLastNonWhiteChar(content) != RIGHT_BRACE) {
+                        // Chunks are enabled and we have an unfinished message, it is necessary to add a sequence of closing chars
+                        content[lastPos - 1] = RIGHT_BRACKET;
+                        content[lastPos] = RIGHT_BRACE;
+                    }
+                    final Document message = DocumentReader.defaultReader().read(content);
+                    if (message.has("kind")) {
+                        // This is not a preamble but out-of-order change chunk
+                        outOfOrderChunk(content);
+                        nonInitialChunk(processor, typeRegistry, content);
+                    }
+                    else {
+                        // Correct initial chunk
+                        txId = message.getLong("xid");
+                        final String timestamp = message.getString("timestamp");
+                        commitTime = dateTime.systemTimestampToInstant(timestamp);
+                        messageInProgress = true;
+                        currentChunk = null;
+                    }
                 }
+            }
+            else {
+                nonInitialChunk(processor, typeRegistry, content);
             }
         }
         catch (final IOException e) {
             throw new ConnectException(e);
         }
+    }
+
+    protected void nonInitialChunk(ReplicationMessageProcessor processor, TypeRegistry typeRegistry,
+                                   final byte[] content)
+            throws IOException, SQLException, InterruptedException {
+        byte firstChar = getFirstNonWhiteChar(content);
+        // We are receiving changes in chunks
+        if (firstChar == LEFT_BRACE) {
+            // First change, this is a valid JSON
+            currentChunk = content;
+        }
+        else if (firstChar == COMMA) {
+            // following changes, they have an extra comma at the start of message
+            if (currentChunk != null) {
+                doProcessMessage(processor, typeRegistry, currentChunk, false);
+            }
+            replaceFirstNonWhiteChar(content, SPACE);
+            currentChunk = content;
+        }
+        else if (firstChar == RIGHT_BRACKET) {
+            // No more changes
+            doProcessMessage(processor, typeRegistry, currentChunk, true);
+            messageInProgress = false;
+        }
+        else {
+            throw new ConnectException("Chunk arrived in unexpected state");
+        }
+    }
+
+    /**
+     * This method is called when a database server or Debezium crashes.
+     * With wal2json streaming mode it can happen that the message preamble is no replayed
+     * but the message is streamed form the middle.
+     * This issue is very hard to reproduce so a precaution is taken and metadata are filled with
+     * synthetic values.
+     * <p>The new wal2json format will be resilient to this situation.
+     *
+     * @param content
+     */
+    protected void outOfOrderChunk(final byte[] content) {
+        // This is not a standalone JSON, we are getting a transaction in progress
+        // Metadata are lost, we need to create artificial ones
+        if (LOGGER.isWarnEnabled()) {
+            LOGGER.warn("Got out of order chunk {}, recording artifical TX", new String(content));
+        }
+        txId = UNDEFINED_LONG;
+        commitTime = Instant.now();
+        messageInProgress = true;
+        currentChunk = null;
     }
 
     private byte getLastNonWhiteChar(byte[] array) throws IllegalArgumentException {
@@ -199,25 +242,34 @@ public class StreamingWal2JsonMessageDecoder implements MessageDecoder {
 
     private void doProcessMessage(ReplicationMessageProcessor processor, TypeRegistry typeRegistry, byte[] content, boolean lastMessage)
             throws IOException, SQLException, InterruptedException {
-        final Document change = DocumentReader.floatNumbersAsTextReader().read(content);
+        if (content != null) {
+            final Document change = DocumentReader.floatNumbersAsTextReader().read(content);
+            LOGGER.trace("Change arrived for decoding {}", change);
+            processor.process(new Wal2JsonReplicationMessage(txId, commitTime, change, containsMetadata, lastMessage, typeRegistry));
+        }
+        else {
+            // If content is null then this is an empty change event that WAL2JSON can generate for events like DDL,
+            // truncate table, materialized views, etc. The transaction still needs to be processed for the heartbeat
+            // to fire.
+            LOGGER.trace("Empty change arrived");
+            processor.process(null);
+        }
 
-        LOGGER.trace("Change arrived for decoding {}", change);
-        processor.process(new Wal2JsonReplicationMessage(txId, commitTime, change, containsMetadata, lastMessage, typeRegistry));
     }
 
     @Override
     public ChainedLogicalStreamBuilder optionsWithMetadata(ChainedLogicalStreamBuilder builder) {
         return optionsWithoutMetadata(builder)
-            .withSlotOption("include-not-null", "true");
+                .withSlotOption("include-not-null", "true");
     }
 
     @Override
     public ChainedLogicalStreamBuilder optionsWithoutMetadata(ChainedLogicalStreamBuilder builder) {
         return builder
-            .withSlotOption("pretty-print", 1)
-            .withSlotOption("write-in-chunks", 1)
-            .withSlotOption("include-xids", 1)
-            .withSlotOption("include-timestamp", 1);
+                .withSlotOption("pretty-print", 1)
+                .withSlotOption("write-in-chunks", 1)
+                .withSlotOption("include-xids", 1)
+                .withSlotOption("include-timestamp", 1);
     }
 
     @Override

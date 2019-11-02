@@ -1,6 +1,14 @@
 # Releasing Debezium
 
-The Debezium project uses Maven for its build system, relying up on the _release_ plugin to most of the work. This document describes the steps required to perform a release.
+The Debezium project uses Maven for its build system, relying up on the _release_ plugin to most of the work.
+
+The release process is automated by means of a parameterized [Jenkins job](https://github.com/debezium/debezium/blob/master/jenkins-jobs/release.yaml),
+that takes the required information as an input (release version etc.)
+and performs most of the required tasks.
+Refer to [Automated Release](#automated-release) below for the details.
+
+The following describes the individual steps of the release process,
+which may be useful for updating the automated pipeline or in case a manual release is necessary.
 
 ## Verify Jira issues
 
@@ -41,6 +49,20 @@ This should report:
 
 Only if this is the case can you proceed with the release.
 
+## Rebase and merge development docs branch
+
+The documentation of the current development version is published from the `development_docs` branch,
+which always is based off of the latest development release tag.
+
+The branch may contain critical documentation updates for the development release documentation,
+which couldn't wait until the next release.
+In this case rebase the branch to the current master and merge it:
+
+    $ git checkout development_docs
+    $ git rebase master
+    $ git checkout master
+    $ git merge development_docs
+
 ## Update versions and tag
 
 Once the codebase is in a state that is ready to be released, use the following command to automatically update the POM to use the release number, commit the changes to your local Git repository, tag that commit, and then update the POM to use snapshot versions and commit to your local Git repository:
@@ -75,6 +97,11 @@ which should show the most recent commits first. The first two lines should look
     * d5bbb11 (tag: v0.2.0) [maven-release-plugin] prepare release v0.2.0
 
 followed by commits made prior to the release. The second line shows the commit from step 4 and includes the tag, while the first line shows the subsequent commit from step 7.
+
+Also point the `development_docs` branch to the release tag:
+
+    $ git checkout development_docs
+    $ git merge <release tag>
 
 ## Push to Git
 
@@ -211,10 +238,13 @@ Then, create a pull request with your changes and wait for a committer to approv
 When the blog post is available, use the [Debezium Twitter account](https://twitter.com/debezium) to announce the release by linking to the blog post.
 
 # Automated Release
-There are few manual steps to be completede before the execution
+
+There are few manual steps to be completed before the execution:
+
 * Update [the changelog](#update-the-changelog)
 * Update [configuration](#reconfigure-docker-hub-builds) for Docker Hub builds
 
-To perform release automatically invoke a [Jenkins job](http://ci.hibernate.org/view/Debezium/job/debezium-release/). Two parameters are requested
+To perform release automatically invoke a [Jenkins job](http://ci.hibernate.org/view/Debezium/job/debezium-release/). Two parameters are requested:
+
 * `RELEASE_VERSION` - a version to be released in format x.y.z
 * `DEVELOPMENT_VERSION` - next development version in format x.y.z-SNAPSHOT
